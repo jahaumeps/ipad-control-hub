@@ -193,7 +193,7 @@
         li.innerHTML = `
           <div class="client-info">
             <span class="client-name">${client.name}</span>
-            <span class="client-status">● 線上</span>
+            <span class="client-status">● 線上 <span style="color: var(--text-secondary); font-size: 0.75rem;">(${client.currentPath || '首頁'})</span></span>
           </div>
           <input type="checkbox" class="client-checkbox" value="${client.id}" checked>
         `;
@@ -252,6 +252,9 @@
               <span class="status-dot active"></span>
               <span>${client.name}</span>
             </div>
+            <span style="font-size: 0.75rem; color: var(--text-secondary); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${client.currentPath || '首頁'}">
+              📍 ${client.currentPath || '首頁'}
+            </span>
             <button class="btn btn-secondary btn-icon refresh-btn" style="width: 28px; height: 28px;" title="重新連線畫面">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path></svg>
             </button>
@@ -416,7 +419,7 @@
       } else {
         // Simple Link Redirect Push
         let targetUrl = urlText;
-        if (!/^https?:\/\//i.test(targetUrl)) {
+        if (!/^[a-z0-9+-.]+:\/\//i.test(targetUrl)) {
           targetUrl = 'http://' + targetUrl;
         }
         payload.fileUrl = targetUrl;

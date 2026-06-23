@@ -90,6 +90,12 @@
     let broadcastPC = null; // PeerConnection for receiving admin broadcast
     let clientName = '';
 
+    function reportStatus(pathName) {
+      if (socket && socket.connected) {
+        socket.emit('client-status-update', { currentPath: pathName });
+      }
+    }
+
     // Autogenerate name
     document.getElementById('clientName').value = 'iPad-' + Math.floor(1000 + Math.random() * 9000);
 
@@ -109,6 +115,7 @@
       socket.on('connect', () => {
         console.log('Connected to server');
         socket.emit('register-client', { name: clientName, device: 'iPad' });
+        reportStatus('首頁');
         
         connectionStatusDot.classList.add('active');
         hudClientName.textContent = clientName;
@@ -353,7 +360,14 @@
         img.src = fileUrl;
         img.className = 'file-display-image';
         fileDisplay.appendChild(img);
+        reportStatus(fileName);
       } else if (fileType === 'application/pdf' || fileType.startsWith('text/') || fileType === 'url') {
+        if (fileType === 'url' && !/^https?:\/\//i.test(fileUrl)) {
+          reportStatus(`跳轉 App: ${fileUrl}`);
+          window.location.href = fileUrl;
+          return;
+        }
+
         const iframe = document.createElement('iframe');
         let finalUrl = fileUrl;
         if (fileType === 'url' && !fileUrl.startsWith(window.location.origin) && !fileUrl.startsWith('/')) {
@@ -361,7 +375,27 @@
         }
         iframe.src = finalUrl;
         iframe.className = 'file-display-iframe';
+        
+        // Track inner URL changes within proxy iframe
+        iframe.addEventListener('load', () => {
+          try {
+            const currentHref = iframe.contentWindow.location.href;
+            const urlObj = new URL(currentHref);
+            if (urlObj.pathname === '/api/proxy') {
+              const proxiedUrl = urlObj.searchParams.get('url');
+              if (proxiedUrl) {
+                reportStatus(proxiedUrl);
+                return;
+              }
+            }
+            reportStatus(currentHref);
+          } catch (e) {
+            console.error('Iframe track error:', e);
+          }
+        });
+
         fileDisplay.appendChild(iframe);
+        reportStatus(fileName);
       } else if (fileType.startsWith('video/')) {
         const video = document.createElement('video');
         video.src = fileUrl;
@@ -369,6 +403,7 @@
         video.autoplay = true;
         video.className = 'file-display-image';
         fileDisplay.appendChild(video);
+        reportStatus(fileName);
       }
 
       fileDisplay.style.display = 'flex';
@@ -386,6 +421,7 @@
       document.getElementById('kioskHome').style.display = 'block';
       document.getElementById('btnCloseDoc').style.display = 'none';
       document.getElementById('hudActions').style.display = 'none';
+      reportStatus('首頁');
     });
 
     // Remote Click simulation on iPad

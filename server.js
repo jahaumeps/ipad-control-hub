@@ -136,6 +136,17 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('admin-broadcast-stopped');
   });
 
+  // 6. Client Status Update (reporting current page/file)
+  socket.on('client-status-update', ({ currentPath }) => {
+    if (clients[socket.id]) {
+      clients[socket.id].currentPath = currentPath || '首頁';
+      console.log(`iPad [${clients[socket.id].name}] updated status: ${currentPath}`);
+      if (adminSocketId) {
+        io.to(adminSocketId).emit('update-clients', Object.values(clients));
+      }
+    }
+  });
+
   // Disconnect handler
   socket.on('disconnect', () => {
     if (socket.id === adminSocketId) {
