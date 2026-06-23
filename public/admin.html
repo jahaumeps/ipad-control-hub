@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>iPad 集中控管主機系統 - 控制中樞</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+  <!-- Header -->
+  <header class="glass-panel" style="margin: 1rem 1rem 0 1rem; border-radius: var(--radius-lg);">
+    <div class="logo-container">
+      <div class="logo-icon">HUB</div>
+      <div class="logo-text">
+        <h1>iPad 集中控管中樞</h1>
+        <p>實時螢幕監看、文件推播與遠端輔助控管</p>
+      </div>
+    </div>
+    
+    <div style="display: flex; gap: 1rem; align-items: center;">
+      <!-- Broadcast Screen Button -->
+      <button id="btnBroadcast" class="btn btn-primary" style="width: auto; padding: 0.5rem 1.25rem;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem;"><path d="M4 11a9 9 0 0 1 9 9"></path><path d="M4 4a16 16 0 0 1 16 16"></path><circle cx="5" cy="19" r="1"></circle></svg>
+        廣播主控畫面
+      </button>
+      
+      <div class="status-badge">
+        <div id="adminStatusDot" class="status-dot active"></div>
+        <span>主機運作中</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <div class="app-container">
+    <!-- Sidebar / Control Panel -->
+    <div class="sidebar">
+      <!-- Connected Devices Card -->
+      <div class="glass-panel">
+        <div class="panel-header">
+          <h2>連線 iPad 列表</h2>
+          <span id="connectedCount" style="background: rgba(255,255,255,0.1); padding: 2px 8px; border-radius: 20px; font-size: 0.8rem;">0</span>
+        </div>
+        <div class="panel-content">
+          <div style="display: flex; justify-content: space-between; margin-bottom: 0.75rem; font-size: 0.8rem; color: var(--text-secondary);">
+            <span>選擇推播對象</span>
+            <label style="cursor: pointer; display: flex; align-items: center; gap: 4px;">
+              <input type="checkbox" id="selectAllClients" checked> 全選
+            </label>
+          </div>
+          <ul id="clientList" class="client-list">
+            <!-- Dynamically populated -->
+          </ul>
+        </div>
+      </div>
+
+      <!-- File & Link Push Panel -->
+      <div class="glass-panel">
+        <div class="panel-header">
+          <h2>文件推播控制</h2>
+        </div>
+        <div class="panel-content">
+          <!-- File Upload Dropzone -->
+          <div class="file-dropzone" id="dropzone">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+            <p id="dropzoneText">拖曳檔案至此，或點擊上傳</p>
+            <span style="font-size: 0.75rem; color: var(--text-muted);">支援 PDF、圖片、影片檔</span>
+            <input type="file" id="fileInput">
+          </div>
+
+          <!-- URL Input alternative -->
+          <div class="input-group">
+            <label for="urlInput">或輸入推播網址 (URL)</label>
+            <input type="url" id="urlInput" class="input-control" placeholder="https://example.com/slide.html">
+          </div>
+
+          <button id="btnPush" class="btn btn-primary">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+            發送推播至已選設備
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Workspace Dashboard Grid -->
+    <div class="dashboard-workspace">
+      <div class="section-title-bar">
+        <h2>監控畫面牆</h2>
+        <div class="grid-controls">
+          <span style="font-size: 0.85rem; color: var(--text-secondary); display: flex; align-items: center; gap: 0.5rem;">
+            💡 點擊個別畫面可在 iPad 上模擬觸控操作
+          </span>
+        </div>
+      </div>
+
+      <!-- Grid of iPad Screen Streams -->
+      <div id="ipadGrid" class="ipad-grid">
+        <!-- Placeholder when empty -->
+        <div class="glass-panel" style="grid-column: 1 / -1; padding: 4rem; text-align: center; color: var(--text-secondary);">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom: 1rem;"><rect x="4" y="2" width="16" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
+          <h3>目前無任何 iPad 連線</h3>
+          <p style="margin-top: 0.5rem; font-size: 0.9rem;">請將 iPad 連線至用戶端網址：<a href="/client.html" target="_blank" style="color: var(--accent-primary); text-decoration: underline;">http://[ServerIP]:3000/client.html</a></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const socket = io();
+    let connectedClients = [];
+    let peerConnections = {}; // clientId -> RTCPeerConnection (Screen Monitoring)
+    let broadcastStream = null;
+    let broadcastPCs = {}; // clientId -> RTCPeerConnection (Broadcast stream to Client)
+    let isBroadcasting = false;
+
+    // Register admin socket
+    socket.emit('register-admin');
+
+    // UI elements references
+    const clientList = document.getElementById('clientList');
+    const connectedCount = document.getElementById('connectedCount');
+    const selectAllClients = document.getElementById('selectAllClients');
+    const fileInput = document.getElementById('fileInput');
+    const dropzone = document.getElementById('dropzone');
+    const dropzoneText = document.getElementById('dropzoneText');
+    const urlInput = document.getElementById('urlInput');
+    const btnPush = document.getElementById('btnPush');
+    const btnBroadcast = document.getElementById('btnBroadcast');
+    const ipadGrid = document.getElementById('ipadGrid');
+
+    // Drag and Drop Upload UI Setup
+    dropzone.addEventListener('click', () => fileInput.click());
+    dropzone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropzone.style.borderColor = 'var(--accent-primary)';
+    });
+    dropzone.addEventListener('dragleave', () => {
+      dropzone.style.borderColor = 'var(--glass-border)';
+    });
+    dropzone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropzone.style.borderColor = 'var(--glass-border)';
+      if (e.dataTransfer.files.length) {
+        fileInput.files = e.dataTransfer.files;
+        handleFileSelect();
+      }
+    });
+    fileInput.addEventListener('change', handleFileSelect);
+
+    function handleFileSelect() {
+      if (fileInput.files.length > 0) {
+        dropzoneText.textContent = `已選擇：${fileInput.files[0].name}`;
+        dropzoneText.style.color = 'var(--accent-primary)';
+      }
+    }
+
+    // Handle Client updates
+    socket.on('update-clients', (clients) => {
+      connectedClients = clients;
+      connectedCount.textContent = clients.length;
+      updateClientListUI();
+      updateMonitorGridUI();
+    });
+
+    // Handle incoming WebRTC signals from clients
+    socket.on('webrtc-signal', async ({ senderId, streamType, signal }) => {
+      console.log(`Received WebRTC signal from Client: ${senderId} [${streamType}]`, signal.type || 'candidate');
+      
+      const pc = streamType === 'broadcast' ? broadcastPCs[senderId] : peerConnections[senderId];
+      if (!pc) return;
+
+      if (signal.type === 'answer') {
+        await pc.setRemoteDescription(new RTCSessionDescription(signal));
+      } else if (signal.candidate) {
+        await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+      }
+    });
+
+    // Update Sidebar List UI
+    function updateClientListUI() {
+      if (connectedClients.length === 0) {
+        clientList.innerHTML = '<li style="text-align: center; color: var(--text-muted); font-size: 0.85rem; padding: 1rem 0;">無設備</li>';
+        return;
+      }
+
+      clientList.innerHTML = '';
+      connectedClients.forEach(client => {
+        const li = document.createElement('li');
+        li.className = 'client-item';
+        li.dataset.id = client.id;
+        
+        li.innerHTML = `
+          <div class="client-info">
+            <span class="client-name">${client.name}</span>
+            <span class="client-status">● 線上</span>
+          </div>
+          <input type="checkbox" class="client-checkbox" value="${client.id}" checked>
+        `;
+        
+        // Toggle selected styling
+        li.addEventListener('click', (e) => {
+          if (e.target.tagName !== 'INPUT') {
+            const checkbox = li.querySelector('.client-checkbox');
+            checkbox.checked = !checkbox.checked;
+          }
+        });
+
+        clientList.appendChild(li);
+      });
+    }
+
+    // Select all handler
+    selectAllClients.addEventListener('change', () => {
+      const checkboxes = document.querySelectorAll('.client-checkbox');
+      checkboxes.forEach(cb => cb.checked = selectAllClients.checked);
+    });
+
+    // Update Monitor Grid UI
+    function updateMonitorGridUI() {
+      // Clear closed/disconnected clients' peer connections
+      const activeIds = connectedClients.map(c => c.id);
+      Object.keys(peerConnections).forEach(id => {
+        if (!activeIds.includes(id)) {
+          console.log('Cleaning WebRTC connection for disconnected client:', id);
+          peerConnections[id].close();
+          delete peerConnections[id];
+        }
+      });
+
+      if (connectedClients.length === 0) {
+        ipadGrid.innerHTML = `
+          <div class="glass-panel" style="grid-column: 1 / -1; padding: 4rem; text-align: center; color: var(--text-secondary);">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom: 1rem;"><rect x="4" y="2" width="16" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
+            <h3>目前無任何 iPad 連線</h3>
+            <p style="margin-top: 0.5rem; font-size: 0.9rem;">請將 iPad 連線至用戶端網址：<a href="/client.html" target="_blank" style="color: var(--accent-primary); text-decoration: underline;">http://${window.location.hostname}:3000/client.html</a></p>
+          </div>
+        `;
+        return;
+      }
+
+      // Preserve existing card structure or rebuild it
+      ipadGrid.innerHTML = '';
+      connectedClients.forEach(client => {
+        const card = document.createElement('div');
+        card.className = 'ipad-card glass-panel';
+        card.id = `card-${client.id}`;
+
+        card.innerHTML = `
+          <div class="ipad-card-header">
+            <div class="ipad-card-title">
+              <span class="status-dot active"></span>
+              <span>${client.name}</span>
+            </div>
+            <button class="btn btn-secondary btn-icon refresh-btn" style="width: 28px; height: 28px;" title="重新連線畫面">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path></svg>
+            </button>
+          </div>
+          <div class="ipad-stream-container">
+            <video id="video-${client.id}" class="ipad-stream-video" autoplay playsinline style="display: none;"></video>
+            <div id="placeholder-${client.id}" class="stream-placeholder">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+              <span>正在建立連線...</span>
+            </div>
+          </div>
+          <div class="ipad-card-actions">
+            <span class="badge badge-live">實時視訊串流</span>
+            <button class="btn btn-primary push-single-btn" style="width: auto; padding: 0.25rem 0.75rem; font-size: 0.8rem;">僅推播此台</button>
+          </div>
+        `;
+
+        // Action: Reconnect Stream button click
+        card.querySelector('.refresh-btn').addEventListener('click', () => {
+          initiateMonitorWebRTC(client.id);
+        });
+
+        // Action: Push to single device button
+        card.querySelector('.push-single-btn').addEventListener('click', () => {
+          performPush([client.id]);
+        });
+
+        // Remote Touch Interaction on the Video screen
+        const video = card.querySelector(`.ipad-stream-video`);
+        video.addEventListener('click', (e) => {
+          const rect = video.getBoundingClientRect();
+          // Calculate percentage coordinates
+          const xPercent = ((e.clientX - rect.left) / rect.width) * 100;
+          const yPercent = ((e.clientY - rect.top) / rect.height) * 100;
+          
+          console.log(`Clicking ${client.name} at: x=${xPercent.toFixed(1)}%, y=${yPercent.toFixed(1)}%`);
+
+          // Send click command to target client
+          socket.emit('remote-control', {
+            targetId: client.id,
+            action: 'click',
+            data: { x: xPercent, y: yPercent }
+          });
+
+          // Draw visual feedback dot on admin side as well
+          const feedback = document.createElement('div');
+          feedback.className = 'control-indicator';
+          feedback.style.left = `${e.clientX - rect.left}px`;
+          feedback.style.top = `${e.clientY - rect.top}px`;
+          video.parentElement.appendChild(feedback);
+          setTimeout(() => feedback.remove(), 800);
+        });
+
+        ipadGrid.appendChild(card);
+
+        // Initiate WebRTC to monitor this client screen
+        if (!peerConnections[client.id]) {
+          initiateMonitorWebRTC(client.id);
+        }
+      });
+    }
+
+    // WebRTC connection setup: Admin pulls screen stream from Client
+    async function initiateMonitorWebRTC(clientId) {
+      console.log(`Initiating screen monitor connection to client ${clientId}`);
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      peerConnections[clientId] = pc;
+
+      // Expecting video track from client iPad
+      pc.addTransceiver('video', { direction: 'recvonly' });
+
+      pc.ontrack = (event) => {
+        console.log(`Received track for client ${clientId}`);
+        const video = document.getElementById(`video-${clientId}`);
+        const placeholder = document.getElementById(`placeholder-${clientId}`);
+        if (video) {
+          video.srcObject = event.streams[0];
+          video.style.display = 'block';
+        }
+        if (placeholder) {
+          placeholder.style.display = 'none';
+        }
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit('webrtc-signal', {
+            targetId: clientId,
+            streamType: 'monitor',
+            signal: { candidate: event.candidate }
+          });
+        }
+      };
+
+      // Create Offer and send to client
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      socket.emit('webrtc-signal', {
+        targetId: clientId,
+        streamType: 'monitor',
+        signal: { type: 'offer', sdp: offer.sdp }
+      });
+    }
+
+    // Document Push Controller Action
+    btnPush.addEventListener('click', () => {
+      // Get selected client IDs
+      const selectedCheckboxes = document.querySelectorAll('.client-checkbox:checked');
+      const targetIds = Array.from(selectedCheckboxes).map(cb => cb.value);
+
+      if (targetIds.length === 0) {
+        showToast('請先選擇至少一台 iPad 作為發送目標', 'danger');
+        return;
+      }
+
+      performPush(targetIds);
+    });
+
+    async function performPush(targetIds) {
+      const file = fileInput.files[0];
+      const urlText = urlInput.value.trim();
+
+      if (!file && !urlText) {
+        showToast('請上傳檔案或填寫網址 URL', 'danger');
+        return;
+      }
+
+      let payload = {
+        fileUrl: '',
+        fileType: '',
+        fileName: ''
+      };
+
+      if (file) {
+        // Upload File First
+        showToast('檔案上傳中，請稍候...', 'info');
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+          const res = await fetch('/api/upload', {
+            method: 'POST',
+            body: formData
+          });
+          const data = await res.json();
+          if (res.ok) {
+            payload.fileUrl = data.url;
+            payload.fileType = data.mimetype;
+            payload.fileName = data.filename;
+          } else {
+            throw new Error(data.error || 'Upload failed');
+          }
+        } catch (error) {
+          console.error(error);
+          showToast('檔案上傳失敗！', 'danger');
+          return;
+        }
+      } else {
+        // Simple Link Redirect Push
+        let targetUrl = urlText;
+        if (!/^https?:\/\//i.test(targetUrl)) {
+          targetUrl = 'http://' + targetUrl;
+        }
+        payload.fileUrl = targetUrl;
+        payload.fileType = 'url';
+        payload.fileName = targetUrl;
+      }
+
+      // Send websocket push command to target list
+      targetIds.forEach(targetId => {
+        socket.emit('push-file', {
+          targetId: targetId,
+          ...payload
+        });
+      });
+
+      showToast(`已推播文件/連結給 ${targetIds.length} 台設備`, 'success');
+      
+      // Clear inputs
+      fileInput.value = '';
+      dropzoneText.textContent = '拖曳檔案至此，或點擊上傳';
+      dropzoneText.style.color = 'var(--text-secondary)';
+      urlInput.value = '';
+    }
+
+    // Screen Broadcast Controller Action
+    btnBroadcast.addEventListener('click', async () => {
+      if (isBroadcasting) {
+        stopBroadcast();
+      } else {
+        await startBroadcast();
+      }
+    });
+
+    async function startBroadcast() {
+      try {
+        broadcastStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: false
+        });
+
+        isBroadcasting = true;
+        btnBroadcast.innerHTML = `
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem;"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect></svg>
+          停止畫面廣播
+        `;
+        btnBroadcast.className = 'btn btn-danger';
+        btnBroadcast.style.width = 'auto';
+
+        // Notify server and all connected clients
+        socket.emit('admin-broadcast-start');
+
+        // Setup WebRTC connections for each client to broadcast stream
+        connectedClients.forEach(client => {
+          initiateBroadcastWebRTC(client.id);
+        });
+
+        // Listen for stream stop event (e.g. from browser built-in stop share button)
+        broadcastStream.getVideoTracks()[0].onended = () => {
+          stopBroadcast();
+        };
+
+        showToast('主控畫面廣播已開啟', 'success');
+      } catch (err) {
+        console.error('Error starting broadcast stream:', err);
+        showToast('無法取得主控畫面共享授權', 'danger');
+      }
+    }
+
+    function stopBroadcast() {
+      if (!isBroadcasting) return;
+
+      isBroadcasting = false;
+      btnBroadcast.innerHTML = `
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.25rem;"><path d="M4 11a9 9 0 0 1 9 9"></path><path d="M4 4a16 16 0 0 1 16 16"></path><circle cx="5" cy="19" r="1"></circle></svg>
+        廣播主控畫面
+      `;
+      btnBroadcast.className = 'btn btn-primary';
+      btnBroadcast.style.width = 'auto';
+
+      if (broadcastStream) {
+        broadcastStream.getTracks().forEach(track => track.stop());
+        broadcastStream = null;
+      }
+
+      // Close all broadcast peer connections
+      Object.keys(broadcastPCs).forEach(clientId => {
+        broadcastPCs[clientId].close();
+      });
+      broadcastPCs = {};
+
+      socket.emit('admin-broadcast-stop');
+      showToast('主控畫面廣播已停止', 'info');
+    }
+
+    // WebRTC connection setup: Admin pushes broadcast screen stream to Client
+    async function initiateBroadcastWebRTC(clientId) {
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      broadcastPCs[clientId] = pc;
+
+      // Add broadcast screen tracks
+      broadcastStream.getTracks().forEach(track => {
+        pc.addTrack(track, broadcastStream);
+      });
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit('webrtc-signal', {
+            targetId: clientId,
+            streamType: 'broadcast',
+            signal: { candidate: event.candidate }
+          });
+        }
+      };
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      socket.emit('webrtc-signal', {
+        targetId: clientId,
+        streamType: 'broadcast',
+        signal: { type: 'offer', sdp: offer.sdp }
+      });
+    }
+
+    // Helper: Toast Notifications
+    function showToast(message, type = 'info') {
+      const toast = document.createElement('div');
+      toast.className = `toast toast-${type}`;
+      toast.textContent = message;
+      document.body.appendChild(toast);
+      
+      setTimeout(() => {
+        toast.style.transition = 'opacity 0.5s ease';
+        toast.style.opacity = '0';
+        setTimeout(() => toast.remove(), 500);
+      }, 3000);
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>iPad 用戶端 - 控制中樞</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+  <!-- Setup Screen -->
+  <div id="setupOverlay" class="setup-overlay">
+    <div class="setup-card glass-panel">
+      <h2>iPad 用戶端連線</h2>
+      <p>請設定此 iPad 的名稱以開始連接控管主機</p>
+      <div class="input-group">
+        <label for="clientName">iPad 名稱</label>
+        <input type="text" id="clientName" class="input-control" placeholder="例如：iPad Pro 01">
+      </div>
+      <button id="btnConnect" class="btn btn-primary" style="margin-bottom: 1rem;">連線至控制中樞</button>
+      
+      <div id="screenSharePrompt" style="display: none;">
+        <p style="color: var(--warning); margin-bottom: 1rem;">⚠️ iOS Safari 安全限制：需要點擊下方按鈕以啟用螢幕畫面共享，使主機可以監看您的畫面。</p>
+        <button id="btnStartShare" class="btn btn-primary">啟動螢幕畫面共享</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Client Main HUD & Kiosk View -->
+  <div class="client-wrapper">
+    <!-- Client Top HUD Bar -->
+    <div class="client-hud">
+      <div class="hud-panel glass-panel client-status-container">
+        <div id="connectionStatusDot" class="status-dot"></div>
+        <span id="hudClientName" style="font-weight: 600;">未連線</span>
+      </div>
+      
+      <div id="hudActions" style="pointer-events: auto; display: none;">
+        <button id="btnCloseDoc" class="btn btn-secondary btn-icon" title="關閉目前文件" style="display: none; width: 40px; height: 40px; border-radius: 50%;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Main Display Space -->
+    <div class="client-main-screen" id="mainScreen">
+      <!-- Default Interactive Content (Kiosk Home) -->
+      <div id="kioskHome" style="text-align: center; padding: 2rem;">
+        <h2 style="font-size: 2rem; margin-bottom: 1rem; background: var(--accent-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">已進入受控狀態</h2>
+        <p style="color: var(--text-secondary);">主控端可隨時監看此畫面、推送文件、廣播畫面，或在此網頁內進行遠端操作。</p>
+        <div style="margin-top: 2rem; display: flex; justify-content: center; gap: 1rem; flex-wrap: wrap;">
+          <div class="glass-panel" style="padding: 1.5rem; width: 180px;">
+            <h4 style="margin-bottom: 0.5rem; color: var(--accent-primary);">1. 畫面監看</h4>
+            <span style="font-size: 0.85rem; color: var(--text-muted);">WebRTC 實時串流</span>
+          </div>
+          <div class="glass-panel" style="padding: 1.5rem; width: 180px;">
+            <h4 style="margin-bottom: 0.5rem; color: var(--accent-secondary);">2. 文件推播</h4>
+            <span style="font-size: 0.85rem; color: var(--text-muted);">PDF / 圖片 / 網頁</span>
+          </div>
+          <div class="glass-panel" style="padding: 1.5rem; width: 180px;">
+            <h4 style="margin-bottom: 0.5rem; color: var(--success);">3. 雙向廣播</h4>
+            <span style="font-size: 0.85rem; color: var(--text-muted);">接收主控廣播畫面</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- File Display Overlay -->
+      <div id="fileDisplay" class="file-display-container" style="display: none;">
+        <!-- Filled dynamically: iframe or img -->
+      </div>
+
+      <!-- Broadcast Overlay (When receiving server screen) -->
+      <div id="broadcastOverlay" class="broadcast-overlay" style="display: none;">
+        <video id="broadcastVideo" class="broadcast-video" autoplay playsinline></video>
+        <div style="position: absolute; top: 1.5rem; right: 1.5rem; background: rgba(239, 68, 68, 0.8); padding: 0.5rem 1rem; border-radius: 50px; font-weight: 600; font-size: 0.85rem; display: flex; align-items: center; gap: 0.5rem; z-index: 1000;">
+          <div class="status-dot active" style="background-color: white;"></div>
+          主控畫面廣播中...
+        </div>
+      </div>
+    </div>
+
+    <!-- Interaction Canvas for showing remote control cursor clicks -->
+    <div id="interactionOverlay" class="interaction-canvas"></div>
+  </div>
+
+  <script>
+    let socket;
+    let localStream = null;
+    let peerConnections = {}; // targetSocketId -> RTCPeerConnection
+    let broadcastPC = null; // PeerConnection for receiving admin broadcast
+    let clientName = '';
+
+    // Autogenerate name
+    document.getElementById('clientName').value = 'iPad-' + Math.floor(1000 + Math.random() * 9000);
+
+    const btnConnect = document.getElementById('btnConnect');
+    const btnStartShare = document.getElementById('btnStartShare');
+    const setupOverlay = document.getElementById('setupOverlay');
+    const screenSharePrompt = document.getElementById('screenSharePrompt');
+    const connectionStatusDot = document.getElementById('connectionStatusDot');
+    const hudClientName = document.getElementById('hudClientName');
+
+    btnConnect.addEventListener('click', () => {
+      clientName = document.getElementById('clientName').value.trim() || 'iPad Client';
+      
+      // Init socket connection
+      socket = io();
+
+      socket.on('connect', () => {
+        console.log('Connected to server');
+        socket.emit('register-client', { name: clientName, device: 'iPad' });
+        
+        connectionStatusDot.classList.add('active');
+        hudClientName.textContent = clientName;
+        
+        btnConnect.style.display = 'none';
+        screenSharePrompt.style.display = 'block';
+      });
+
+      // Handle direct signaling messages for screen monitoring (from Admin)
+      socket.on('webrtc-signal', async ({ senderId, streamType, signal }) => {
+        console.log('Received signal from:', senderId, 'Type:', streamType);
+        
+        if (streamType === 'broadcast') {
+          if (signal.type === 'offer') {
+            await handleBroadcastOffer(senderId, signal);
+          } else if (signal.candidate) {
+            if (broadcastPC) {
+              await broadcastPC.addIceCandidate(new RTCIceCandidate(signal.candidate));
+            }
+          }
+        } else {
+          // Default: Monitor stream
+          if (signal.type === 'offer') {
+            await handleOffer(senderId, signal);
+          } else if (signal.candidate) {
+            const pc = peerConnections[senderId];
+            if (pc) {
+              await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+            }
+          }
+        }
+      });
+
+      // Handle broadcast signal setup (Admin broadcasting to us)
+      socket.on('admin-broadcast-started', ({ adminId }) => {
+        console.log('Admin started broadcast. Preparing UI overlay.');
+        document.getElementById('broadcastOverlay').style.display = 'flex';
+      });
+
+      socket.on('admin-broadcast-stopped', () => {
+        console.log('Admin stopped broadcast.');
+        document.getElementById('broadcastOverlay').style.display = 'none';
+        if (broadcastPC) {
+          broadcastPC.close();
+          broadcastPC = null;
+        }
+        document.getElementById('broadcastVideo').srcObject = null;
+      });
+
+      // Handle pushed files
+      socket.on('receive-file', ({ fileUrl, fileType, fileName }) => {
+        showPushedFile(fileUrl, fileType, fileName);
+      });
+
+      // Handle remote control clicks
+      socket.on('remote-control', ({ action, data }) => {
+        if (action === 'click') {
+          handleRemoteClick(data.x, data.y);
+        }
+      });
+
+      socket.on('disconnect', () => {
+        console.log('Disconnected from server');
+        connectionStatusDot.classList.remove('active');
+        hudClientName.textContent = '已斷線';
+      });
+    });
+
+    // Request screen capture stream on iOS / Browser
+    btnStartShare.addEventListener('click', async () => {
+      try {
+        // Option A: Real system screen share (Requires iOS Safari user confirmation)
+        localStream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 960 },
+            frameRate: { ideal: 15 }
+          },
+          audio: false
+        });
+        
+        showToast('螢幕共享已啟動！', 'success');
+        setupOverlay.style.display = 'none';
+        
+      } catch (err) {
+        console.error('Error sharing screen:', err);
+        showToast('無法取得螢幕畫面。您可以使用虛擬畫面繼續模擬。', 'danger');
+        
+        // Option B: Fallback to canvas screenshotting/mock stream if displayMedia fails
+        createMockStream();
+        setupOverlay.style.display = 'none';
+      }
+    });
+
+    // Create a mock stream using canvas if screen capture is rejected or unsupported
+    function createMockStream() {
+      const canvas = document.createElement('canvas');
+      canvas.width = 1024;
+      canvas.height = 768;
+      const ctx = canvas.getContext('2d');
+      
+      // Render animated web page elements to canvas for live simulation
+      setInterval(() => {
+        ctx.fillStyle = '#0a0c10';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Draw decorative grid
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+        for (let i = 0; i < canvas.width; i += 40) {
+          ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke();
+        }
+        for (let j = 0; j < canvas.height; j += 40) {
+          ctx.beginPath(); ctx.moveTo(0, j); ctx.lineTo(canvas.width, j); ctx.stroke();
+        }
+
+        // Kiosk status info
+        ctx.fillStyle = '#f3f4f6';
+        ctx.font = 'bold 36px Outfit';
+        ctx.fillText(clientName, 50, 80);
+        ctx.font = '20px Outfit';
+        ctx.fillStyle = '#9ca3af';
+        ctx.fillText('iOS 模擬控制模式 (WebRTC 虛擬畫面)', 50, 120);
+
+        // Time indicator
+        ctx.fillStyle = '#3b82f6';
+        ctx.fillText('伺服器連線狀態: 運作中', 50, 160);
+        ctx.fillStyle = '#f3f4f6';
+        ctx.fillText(new Date().toLocaleTimeString(), 50, 200);
+
+        // Render current displayed file or content info
+        const fileDisplay = document.getElementById('fileDisplay');
+        if (fileDisplay.style.display !== 'none') {
+          ctx.fillStyle = '#8b5cf6';
+          ctx.fillRect(50, 250, 924, 460);
+          ctx.fillStyle = '#ffffff';
+          ctx.font = 'bold 28px Outfit';
+          ctx.fillText('📄 目前顯示文件中 (請至實機查看主畫面)', 100, 350);
+        } else {
+          // Draw sample buttons
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
+          ctx.fillRect(50, 250, 250, 80);
+          ctx.fillStyle = '#f3f4f6';
+          ctx.font = '20px Outfit';
+          ctx.fillText('🏠 返回首頁 (元素A)', 80, 296);
+
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
+          ctx.fillRect(340, 250, 250, 80);
+          ctx.fillStyle = '#f3f4f6';
+          ctx.fillText('📂 專案列表 (元素B)', 370, 296);
+        }
+      }, 100);
+
+      localStream = canvas.captureStream(15);
+    }
+
+    // WebRTC connection logic for monitoring (Inbound offer from Admin)
+    async function handleOffer(adminId, offer) {
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      peerConnections[adminId] = pc;
+
+      // Add local screen tracks to PC
+      localStream.getTracks().forEach(track => {
+        pc.addTrack(track, localStream);
+      });
+
+      // Signal ICE candidates back to admin
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit('webrtc-signal', {
+            targetId: adminId,
+            streamType: 'monitor',
+            signal: { candidate: event.candidate }
+          });
+        }
+      };
+
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      socket.emit('webrtc-signal', {
+        targetId: adminId,
+        streamType: 'monitor',
+        signal: { type: 'answer', sdp: answer.sdp }
+      });
+    }
+
+    // WebRTC connection logic for receiving Broadcast from Admin
+    async function handleBroadcastOffer(adminId, offer) {
+      if (!broadcastPC) {
+        initBroadcastReceiver(adminId);
+      }
+      try {
+        await broadcastPC.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await broadcastPC.createAnswer();
+        await broadcastPC.setLocalDescription(answer);
+
+        socket.emit('webrtc-signal', {
+          targetId: adminId,
+          streamType: 'broadcast',
+          signal: { type: 'answer', sdp: answer.sdp }
+        });
+      } catch (err) {
+        console.error('Error handling broadcast offer:', err);
+      }
+    }
+
+    function initBroadcastReceiver(adminId) {
+      broadcastPC = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      broadcastPC.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit('webrtc-signal', {
+            targetId: adminId,
+            streamType: 'broadcast',
+            signal: { candidate: event.candidate }
+          });
+        }
+      };
+
+      broadcastPC.ontrack = (event) => {
+        console.log('Received broadcast track');
+        document.getElementById('broadcastVideo').srcObject = event.streams[0];
+      };
+    }
+
+    // Display Pushed Document
+    function showPushedFile(fileUrl, fileType, fileName) {
+      const fileDisplay = document.getElementById('fileDisplay');
+      const kioskHome = document.getElementById('kioskHome');
+      const btnCloseDoc = document.getElementById('btnCloseDoc');
+      
+      fileDisplay.innerHTML = '';
+      
+      if (fileType.startsWith('image/')) {
+        const img = document.createElement('img');
+        img.src = fileUrl;
+        img.className = 'file-display-image';
+        fileDisplay.appendChild(img);
+      } else if (fileType === 'application/pdf' || fileType.startsWith('text/') || fileType === 'url') {
+        const iframe = document.createElement('iframe');
+        let finalUrl = fileUrl;
+        if (fileType === 'url' && !fileUrl.startsWith(window.location.origin) && !fileUrl.startsWith('/')) {
+          finalUrl = '/api/proxy?url=' + encodeURIComponent(fileUrl);
+        }
+        iframe.src = finalUrl;
+        iframe.className = 'file-display-iframe';
+        fileDisplay.appendChild(iframe);
+      } else if (fileType.startsWith('video/')) {
+        const video = document.createElement('video');
+        video.src = fileUrl;
+        video.controls = true;
+        video.autoplay = true;
+        video.className = 'file-display-image';
+        fileDisplay.appendChild(video);
+      }
+
+      fileDisplay.style.display = 'flex';
+      kioskHome.style.display = 'none';
+      
+      // Enable close file button
+      document.getElementById('hudActions').style.display = 'block';
+      btnCloseDoc.style.display = 'block';
+      
+      showToast(`推播文件：${fileName}`, 'info');
+    }
+
+    document.getElementById('btnCloseDoc').addEventListener('click', () => {
+      document.getElementById('fileDisplay').style.display = 'none';
+      document.getElementById('kioskHome').style.display = 'block';
+      document.getElementById('btnCloseDoc').style.display = 'none';
+      document.getElementById('hudActions').style.display = 'none';
+    });
+
+    // Remote Click simulation on iPad
+    function handleRemoteClick(xPercent, yPercent) {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      const absoluteX = Math.round(width * (xPercent / 100));
+      const absoluteY = Math.round(height * (yPercent / 100));
+
+      // 1. Show indicator visualizer on screen
+      const indicator = document.createElement('div');
+      indicator.className = 'control-indicator';
+      indicator.style.left = `${absoluteX}px`;
+      indicator.style.top = `${absoluteY}px`;
+      document.getElementById('interactionOverlay').appendChild(indicator);
+      
+      setTimeout(() => {
+        indicator.remove();
+      }, 800);
+
+      // 2. Perform DOM click simulation (if clicking web element)
+      const targetElement = document.elementFromPoint(absoluteX, absoluteY);
+      if (targetElement) {
+        console.log(`Remote clicked element:`, targetElement);
+        // Trigger standard click
+        targetElement.click();
+        
+        // Focus if input
+        if (targetElement.tagName === 'INPUT' || targetElement.tagName === 'TEXTAREA') {
+          targetElement.focus();
+        }
+      }
+    }
+
+    // Helper: Toast Notifications
+    function showToast(message, type = 'info') {
+      const toast = document.createElement('div');
+      toast.className = `toast toast-${type}`;
+      toast.textContent = message;
+      document.body.appendChild(toast);
+      
+      setTimeout(() => {
+        toast.style.transition = 'opacity 0.5s ease';
+        toast.style.opacity = '0';
+        setTimeout(() => toast.remove(), 500);
+      }, 3000);
+    }
+  </script>
+</body>
+</html>
